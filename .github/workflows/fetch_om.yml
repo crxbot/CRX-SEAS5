@@ -107,7 +107,7 @@ jobs:
           mkdir -p seas5/${{ matrix.variable }}
           input_dir="data/${{ matrix.variable }}"
           spread_dir="data/${{ matrix.variable }}_spread"
-          script="scripts/generate_pngs.py"
+          script="scripts/generate_webp.py"
           python "$script" \
             "$input_dir" \
             seas5/${{ matrix.variable }} \
