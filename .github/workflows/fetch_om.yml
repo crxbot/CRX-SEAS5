@@ -1,0 +1,174 @@
+name: Fetch SEAS5 OM File and Generate Webp
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch_and_generate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.set_run_date.outputs.run }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.SEAS5_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+
+      - name: Cache Python packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Set RUN and DATE
+        id: set_run_date
+        run: |
+          HOUR=$(date -u +%H)
+          case $HOUR in
+            11|12|13|14|15) RUN=00 ;;
+          esac
+          YEAR=$(date -u +%Y)
+          MONTH=$(date -u +%m)
+          DAY=01
+          DATE=$(date -u +%Y%m%d)
+          # set env variables
+          echo "RUN=$RUN" >> $GITHUB_ENV
+          echo "YEAR=$YEAR" >> $GITHUB_ENV
+          echo "MONTH=$MONTH" >> $GITHUB_ENV
+          echo "DAY=$DAY" >> $GITHUB_ENV
+          echo "DATE=$DATE" >> $GITHUB_ENV
+          # set step output for job output
+          echo "run=$RUN" >> $GITHUB_OUTPUT
+
+      - name: Download OM files from Open-Meteo S3
+        run: |
+          mkdir -p data/t2m_max data/t2m_min data/t2m_max_spread data/t2m_min_spread
+
+          BASE_URL="https://openmeteo.s3.amazonaws.com/data_run/ecmwf_seas5_daily_ensemble_mean/${YEAR}/${MONTH}/${DAY}/${RUN}00Z"
+
+          echo "Lade von: $BASE_URL"
+
+          curl -fSL "${BASE_URL}/temperature_2m_max.om" -o "data/t2m_max/temperature_2m_max.om"
+          curl -fSL "${BASE_URL}/temperature_2m_min.om" -o "data/t2m_min/temperature_2m_min.om"
+          curl -fSL "${BASE_URL}/temperature_2m_max_spread.om" -o "data/t2m_max_spread/temperature_2m_max_spread.om"
+          curl -fSL "${BASE_URL}/temperature_2m_min_spread.om" -o "data/t2m_min_spread/temperature_2m_min_spread.om"
+         
+
+          
+      - name: Upload data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: om-file
+          path: data/
+
+      - name: Delete data files (local cleanup)
+        run: rm -rf data/
+
+
+  generate_pngs:
+    runs-on: ubuntu-latest
+    needs: fetch_and_generate
+    strategy:
+      matrix:
+        variable: [t2m_max, t2m_min]
+      max-parallel: 2
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download GRIB2 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: om-file
+          path: data/
+
+      - name: Generate PNGs for ${{ matrix.variable }}
+        run: |
+          mkdir -p seas5/${{ matrix.variable }}
+          input_dir="data/${{ matrix.variable }}"
+          spread_dir="data/${{ matrix.variable }}_spread"
+          script="scripts/generate_pngs.py"
+          python "$script" \
+            "$input_dir" \
+            seas5/${{ matrix.variable }} \
+            ${{ matrix.variable }} \
+            "$spread_dir"
+
+
+      - name: Upload PNGs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seas5-${{ matrix.variable }}
+          path: seas5/${{ matrix.variable }}
+
+  deploy_to_r2:
+    runs-on: ubuntu-latest
+    needs: [fetch_and_generate, generate_pngs]
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Download all PNGs artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: seas5-*
+          path: seas5_raw
+
+      - name: Merge PNG folders into one structure
+        run: |
+          mkdir -p seas5/${{ needs.fetch_and_generate.outputs.run }}
+          for d in seas5_raw/*; do
+            if [ -d "$d" ]; then
+              varname=$(basename "$d" | sed 's/^seas5-//')  # entfernt "seas5-" Prefix
+              mkdir -p seas5/${{ needs.fetch_and_generate.outputs.run }}/"$varname"
+              cp -r "$d"/* seas5/${{ needs.fetch_and_generate.outputs.run }}/"$varname"/ || true
+            fi
+          done
+
+      - name: Generate Metadata
+        run: |
+          python scripts/generate_metadata.py seas5/${{ needs.fetch_and_generate.outputs.run }} ${{ needs.fetch_and_generate.outputs.run }} ${{ env.DATE }}
+
+      - name: Clean old runs on R2 except current
+        run: |
+          for run_folder in $(aws s3 ls s3://${{ secrets.R2_BUCKET }}/seas5/ --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com | awk '{print $2}' | sed 's#/##'); do
+            if [ "$run_folder" != "${{ needs.fetch_and_generate.outputs.run }}/" ]; then
+              aws s3 rm s3://${{ secrets.R2_BUCKET }}/seas5/$run_folder --recursive --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+            fi
+          done
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+      - name: Upload current run and metadata.json to R2
+        run: |
+          # Upload run folder
+          aws s3 sync ./seas5/${{ needs.fetch_and_generate.outputs.run }}/ s3://${{ secrets.R2_BUCKET }}/seas5/${{ needs.fetch_and_generate.outputs.run }}/ \
+            --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+
+          # Upload metadata.json outside run folder
+          aws s3 cp ./seas5/metadata.json s3://${{ secrets.R2_BUCKET }}/seas5/metadata.json \
+            --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
