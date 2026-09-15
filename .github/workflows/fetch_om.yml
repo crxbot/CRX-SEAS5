@@ -11,18 +11,18 @@ jobs:
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.SEAS5_PAT }}
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
 
       - name: Cache Python packages
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -68,7 +68,7 @@ jobs:
 
           
       - name: Upload data as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: om-file
           path: data/
@@ -86,10 +86,10 @@ jobs:
       max-parallel: 2
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -97,7 +97,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Download GRIB2 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: om-file
           path: data/
@@ -116,7 +116,7 @@ jobs:
 
 
       - name: Upload PNGs artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: seas5-${{ matrix.variable }}
           path: seas5/${{ matrix.variable }}
@@ -126,10 +126,10 @@ jobs:
     needs: [fetch_and_generate, generate_pngs]
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       - name: Download all PNGs artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: seas5-*
           path: seas5_raw
